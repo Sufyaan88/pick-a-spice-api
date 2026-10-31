@@ -29,16 +29,21 @@ public class Category {
 	@Column(nullable = false)
 	private boolean active;
 
-	Category(String name, String description, boolean active) {
+	@Column(name = "parent_id")
+	private Long parentId;
+
+	Category(String name, String description, boolean active, Long parentId) {
 		this.name = name;
 		this.description = description;
 		this.active = active;
+		this.parentId = parentId;
 	}
 
-	void update(String name, String description, boolean active) {
+	void update(String name, String description, boolean active, Long parentId) {
 		this.name = name;
 		this.description = description;
 		this.active = active;
+		this.parentId = parentId;
 	}
 
 }
