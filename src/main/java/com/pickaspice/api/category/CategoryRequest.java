@@ -9,7 +9,8 @@ public record CategoryRequest(
 		@NotBlank(message = "Name is required.")
 		@Size(max = 100, message = "Name must be at most 100 characters.") String name,
 		@Size(max = 1000, message = "Description must be at most 1000 characters.") String description,
-		@NotNull(groups = Update.class, message = "Active is required.") Boolean active) {
+		@NotNull(groups = Update.class, message = "Active is required.") Boolean active,
+		Long parentId) {
 
 	public CategoryRequest {
 		name = name == null ? null : name.strip();

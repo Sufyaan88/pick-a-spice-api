@@ -4,14 +4,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 
-final class CategoryFixtures {
+public final class CategoryFixtures {
 
 	static final Map<String, Object> EXISTING_CATEGORY = Map.of(
 			"name", "Herbal Oils", "description", "Original", "active", true);
-	static final Map<String, Object> HERBAL_OILS = Map.of(
+	public static final Map<String, Object> HERBAL_OILS = Map.of(
 			"name", "Herbal Oils", "description", "Natural oils");
+	public static final Map<String, Object> HERBAL_PRODUCTS = Map.of("name", "Herbal Products");
 	static final Map<String, Object> PACKAGING = Map.of("name", "Packaging");
-	static final Map<String, Object> INACTIVE_INCENSE = Map.of("name", "Incense", "active", false);
+	public static final Map<String, Object> INACTIVE_INCENSE = Map.of("name", "Incense", "active", false);
 	static final List<Map<String, Object>> PAGINATION_CATEGORIES = List.of(
 			Map.of("name", "Packaging", "description", "Packaging description", "active", true),
 			Map.of("name", "Herbal Oils", "description", "Herbal Oils description", "active", false),

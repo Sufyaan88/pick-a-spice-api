@@ -43,14 +43,14 @@ public class CategoryController {
 	@PostMapping
 	@ResponseStatus(HttpStatus.CREATED)
 	public CategoryResponse create(@Valid @RequestBody CategoryRequest request) {
-		Category category = service.create(request.name(), request.description(), request.active());
+		Category category = service.create(request.name(), request.description(), request.active(), request.parentId());
 		return CategoryResponse.from(category);
 	}
 
 	@PutMapping("/{id}")
 	public CategoryResponse update(@PathVariable Long id,
 			@Validated(CategoryRequest.Update.class) @RequestBody CategoryRequest request) {
-		Category category = service.update(id, request.name(), request.description(), request.active());
+		Category category = service.update(id, request.name(), request.description(), request.active(), request.parentId());
 		return CategoryResponse.from(category);
 	}
 

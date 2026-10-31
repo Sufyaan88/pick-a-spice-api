@@ -46,6 +46,7 @@ The project owner, who builds the system part-time and needs deployment, diagnos
 - Catalogue cards show a product's name, primary image, and public price.
 - Product detail pages provide richer information, including description, available variants, and relevant measurements such as weight or size.
 - Products can have multiple variants with different sizes, weights, pack quantities, or prices.
+- Variants are optional. A simple product has its own price and does not require a synthetic "Standard" variant. The first product operation creates a simple product with one optional externally hosted image.
 - Products are grouped into categories. The catalogue covers much more than spices, including packaging products, herbal powders and oils, fragrances, religious items, incense, personal-care products, batteries, knives, scales, and other stock carried by the business.
 - Inactive products are hidden from all public catalogue views.
 - Inactive categories and their products are hidden from public browsing. This rule will be implemented with catalogue browsing.
@@ -84,15 +85,15 @@ These may be valuable later, but designing or implementing them now would increa
 
 The first model should remain generic because the business sells many kinds of products rather than only spices.
 
-- `Product`: stable identifier, name, slug, description, category, active status, and timestamps
-- `ProductVariant`: a customer-facing label such as `100 g`, `500 ml`, `Pack of 100`, or `Large`, plus price, active status, and an optional SKU
-- `ProductImage`: external URL, alternative text, display order, and an indication of the primary image
-- `Category`: generated numeric ID, name, active status, and optional description; no URL name in the initial implementation
+- `Product`: stable identifier, name, slug, description, category, price for products without variants, active status, and timestamps
+- `ProductVariant` (optional): a customer-facing label such as `100 g`, `500 ml`, `Pack of 100`, or `Large`, plus price, active status, and an optional SKU
+- Initially, `Product` holds one optional image URL and alternative text directly. A later multiple-image feature may introduce `ProductImage` with display order and a primary-image indicator.
+- `Category`: generated numeric ID, name, active status, optional description, and optional parent category ID; supports one level of subcategories, with no URL name in the initial implementation
 - Product specifications: optional structured details for information that varies by product type
 
 A **slug** is a short, URL-friendly identifier derived from a readable name. For example, a product named `Black Seed Oil 100ml` could use the slug `black-seed-oil-100ml`, producing a page URL such as `/products/black-seed-oil-100ml`. Slugs avoid exposing database identifiers in customer-facing URLs and make links easier to read and share. They must be unique and should remain stable when possible.
 
-For catalogue cards, a product with one active variant can show that variant's price. A product with several differently priced active variants can display the lowest price as `From R...`. The detail page presents the available variants and their exact prices.
+Products without variants use their own price. For catalogue cards, a product with one active variant can show that variant's price. A product with several differently priced active variants can display the lowest price as `From R...`. The detail page presents the available variants and their exact prices. Simple-product price validation is agreed below; the transition between simple products and products with variants still needs agreement.
 
 The exact representation of flexible specifications still needs design. Avoid adding spice-specific columns that do not make sense for bags, books, fragrances, knives, or other categories.
 
@@ -123,7 +124,7 @@ The exact representation of flexible specifications still needs design. Avoid ad
 - `GET /api/admin/categories/{id}` returns `200` with the saved category's `id`, `name`, `description`, and `active` status. Both active and inactive categories can be read through this authenticated maintenance endpoint.
 - Missing categories return `404` with the shared category-not-found error. Non-numeric IDs return `400`. Anonymous JSON requests return `401` without category data.
 - Reads leave stored data unchanged and do not require a CSRF token. Existing default authentication remains in place; dedicated administrator authorization is still a separate feature.
-- The operation reuses `CategoryResponse`, `CategoryRepository`, and shared error handling. Update and read share the same category lookup; no new production types or migrations are needed.
+- The operation reuses `CategoryResponse`, `CategoryRepository`, and shared error handling. Read uses the existing category lookup; hierarchy writes use locked lookups as described in the subcategory contract below.
 
 ### Agreed category administration-list contract
 
@@ -141,7 +142,77 @@ The exact representation of flexible specifications still needs design. Avoid ad
 - Missing categories return `404` using the existing category-not-found error. Non-numeric IDs and IDs outside the numeric range return `400`.
 - Authentication and CSRF protection remain required. Anonymous requests with a valid CSRF token return `401`; signed-in requests without a CSRF token return `403`.
 - Successful deletion removes the database row and leaves other categories unchanged. Rejected requests leave existing data unchanged. Use `active: false` to hide a category without permanently removing it.
-- Reuses the category lookup, repository, shared error handling, and named test fixtures. No new production classes or schema migration are needed. Product relationships do not exist yet; their deletion constraints must be agreed when that feature is designed.
+- Reuses the category lookup, repository, shared error handling, and named test fixtures. Product relationships now also restrict deletion, as described in the product creation contract below.
+
+### Agreed optional subcategory contract
+
+- Category create and update accept nullable `parentId`. Category responses, including list items, include `parentId`; top-level categories return null. Lists remain flat and ordered by ID, with no implicit grouping or filtering.
+- Omitted or null `parentId` creates a top-level category on POST and clears the parent on PUT. Existing categories become top-level through the additive V2 Flyway migration.
+- Only one level is allowed. A category cannot be its own parent, use a subcategory as its parent, or move beneath another category while it has children. These failures return `400`; missing parents return `404`. Rejected operations leave all stored data unchanged.
+- Subcategories can move between top-level parents, keep their current parent, or become top-level. Top-level categories with children can still be edited while remaining top-level.
+- Category names remain case-insensitively unique across the whole catalogue, regardless of parent.
+- Deleting a category with any subcategories returns `409`; children are never deleted or detached automatically. Deleting a subcategory leaves its parent unchanged.
+- Inactive parents are allowed for private maintenance. Parent and child active flags are independent. Public browsing will hide subcategories and their products beneath inactive parents; that visibility behaviour remains deferred.
+- PostgreSQL enforces the parent foreign key and rejects self-reference. The service validates hierarchy depth, locking affected category rows in ID order within each write transaction so concurrent requests cannot create extra levels or orphaned children. Parent IDs are stored directly on the entity, avoiding unnecessary parent loading for HTTP responses.
+- Existing authentication and CSRF protections remain in place. Reuses the category stack, shared business errors, and real HTTP/PostgreSQL integration tests.
+
+### Agreed product creation contract
+
+- `POST /api/admin/products` returns `201` with generated numeric `id`, `name`, `description`, `price`, `categoryId`, `active`, `imageUrl`, and `imageAltText`.
+- Name is required, trimmed before validation and storage, limited to 200 characters, and case-insensitively unique across all products. Description is optional, nullable, and limited to 5,000 characters.
+- Price is required, positive, and expressed in South African rand, with at most two decimal places and ten integer digits. Use Java `BigDecimal` and PostgreSQL `NUMERIC(12,2)`. Reject excess precision rather than rounding requests.
+- Category is required and must exist. Products can belong to either a top-level category or subcategory. Inactive categories and categories beneath inactive parents remain available for private maintenance; public visibility remains deferred.
+- Active defaults to true when omitted or null. Explicit false creates an inactive product.
+- One image is optional. Image URL must be a valid HTTPS URL of at most 2,048 characters; alternative text is optional and limited to 200 characters. Alternative text without an image URL is rejected. Metadata is stored directly on the product; image files remain external, and the API does not fetch or upload them.
+- Invalid input and malformed JSON return `400` problem-detail JSON; a missing category returns `404`; duplicate product names return `409`. Rejected operations leave existing records unchanged and save no product.
+- Categories containing any products, active or inactive, cannot be deleted and return `409`. Products are never deleted automatically. A foreign key enforces the relationship, and creation locks the selected category until commit to coordinate with deletion.
+- Existing default authentication and CSRF protection remain required. Dedicated admin authorization is separate.
+- Creation uses the product entity/repository/service/controller stack, shared business errors, and an additive V3 Flyway migration. Optional variants, multiple images, image uploads, slugs, timestamps, and public browsing are deferred. Read by ID, administration listing, updates, and deletion are described below.
+
+### Agreed product read-by-ID contract
+
+- `GET /api/admin/products/{id}` returns `200` with the existing product response fields: `id`, `name`, `description`, `price`, `categoryId`, `active`, `imageUrl`, and `imageAltText`. Nullable fields remain null when absent.
+- Authenticated maintenance reads include active and inactive products, including products in inactive categories. Public browsing and its visibility rules remain separate features.
+- Missing products return `404` with the shared `PRODUCT_NOT_FOUND` business error and safe message `Product not found.` Non-numeric IDs and values outside the numeric range return `400`. Anonymous JSON requests return `401` without product data.
+- GET requires no CSRF token and leaves stored products and categories unchanged. Reuses the product repository, service, controller response mapping, shared errors, real HTTP test client, and immutable fixtures. No schema migration or new production types are needed.
+
+### Agreed product administration-list contract
+
+- `GET /api/admin/products?page=0&size=20` returns `200` with `items`, `page`, `size`, and `totalCount`, using `common.PageResponse<T>`. Items contain the existing product response fields; totalCount counts all products across all pages.
+- Includes active and inactive products from all categories and subcategories, including inactive categories and categories beneath inactive parents. Orders by numeric ID ascending and paginates in PostgreSQL. Filtering, search, and public visibility rules are separate features.
+- Page defaults to zero and must be non-negative. Size defaults to 20 and must be between 1 and 100. Non-integer values and values outside the integer range return `400` problem-detail JSON.
+- The requested offset (`page * size`) must not exceed 2,147,483,647, JPA's supported maximum. Larger offsets return `400` using the existing `PAGE_OFFSET_TOO_LARGE` business error, with calculations performed using a long value.
+- Within that limit, empty catalogues and pages beyond available results return an empty items array with the requested page information and full total count.
+- Authentication remains required; anonymous JSON requests return `401` without product data. GET requires no CSRF token and leaves products and categories unchanged.
+- Reuses the product repository/service/controller, response mapping, shared pagination envelope and error code, real HTTP test client, and immutable product fixtures. No schema migration or new production types are needed.
+
+### Agreed product update contract
+
+- `PUT /api/admin/products/{id}` replaces the editable fields of an existing product and returns `200` using the existing product response. The numeric ID is preserved; missing products are never created.
+- Name, price, category, description, and image fields follow creation rules. Keeping the product's own case-insensitive name is allowed. Active is required as a non-null boolean; activation and deactivation are supported.
+- Omitted or null description, image URL, and alternative text clear those fields. Alternative text without an image URL in the request remains invalid.
+- Category can remain unchanged or move to another existing top-level category or subcategory, including inactive categories and categories beneath inactive parents.
+- Invalid input, malformed JSON, and invalid IDs return `400`. Missing products or categories return `404`; another product's name returns `409`. Rejected updates leave stored records unchanged, including category, price, active status, and image metadata.
+- Updates run in one transaction and acquire the destination category lock before changing the product, coordinating with category deletion. Shared save handling translates recognized duplicate-name failures while preserving their causes. Images remain external metadata; no files are fetched, uploaded, or deleted.
+- Authentication and CSRF protection remain required. Reuses the product stack, shared business errors, response mapping, and real HTTP/PostgreSQL tests. A request validation group requires active for PUT while preserving the POST default. No schema migration or new production classes are needed.
+
+### Agreed product deletion contract
+
+- `DELETE /api/admin/products/{id}` permanently removes an existing active or inactive product and its image metadata, returning `204` with an empty response body. Externally hosted image files are not deleted.
+- Missing products return `404` using the existing `PRODUCT_NOT_FOUND` business error. Non-numeric IDs and values outside the numeric range return `400` problem-detail JSON.
+- Authentication and CSRF protection remain required. Anonymous JSON requests with a valid CSRF token return `401`; signed-in requests without a token return `403`.
+- Successful deletion removes the database row and leaves other products and categories unchanged. Rejected requests leave existing data unchanged. Use `active: false` when hiding a product should retain its record.
+- Once a category has no products or subcategories, it can be deleted through the existing category endpoint. Product deletion does not delete categories automatically.
+- Updates and deletes lock the product row for their transaction. Concurrent deletes return one `204` and one `404`. A concurrent update either completes before deletion or returns `404`; it cannot recreate the deleted product.
+- Reuses the product stack, shared errors, real HTTP test client, and immutable product/category fixtures. Tests create fresh records through HTTP and clean products before categories before and after each test in disposable PostgreSQL. No schema migration or new production classes are needed.
+
+### JSON type and validation-error rules
+
+- Numeric IDs in JSON request bodies must be integer numbers. Reject fractional/decimal tokens, quoted numbers, and empty strings with `400` before DTO conversion can truncate them or treat them as null. This applies to `categoryId` and optional `parentId` on POST and PUT; valid integer IDs and explicitly permitted nulls retain their existing behaviour.
+- Active flags accept JSON booleans. Numbers, quoted booleans, and empty strings return `400`. Creation still defaults omitted/null active to true; updates still require an explicit non-null boolean. The rules apply to both categories and products.
+- A focused `JsonConfiguration` customizes the existing Jackson mapper's integer and boolean coercion rules. URL/query parameter conversion and the existing decimal price handling remain separate.
+- Product image validation reports violations against `imageUrl` and `imageAltText`, matching the input fields. `ValidProductImage` keeps the image and cross-field checks together, with its validator nested beside the annotation; `ApiExceptionHandler` continues mapping field errors without product-specific aliases.
+- Real HTTP/PostgreSQL regression tests cover rejected input types and unchanged data on POST and PUT, plus image-error field names. No schema change or new dependency is required.
 
 ## System context
 
@@ -197,14 +268,14 @@ Hosting and deployment-provider research is outside the current API-development 
 
 ### Development status and pending work
 
-- Automated test setup uses named immutable category fixtures and real HTTP setup helpers. Each test creates fresh records as needed and cleans database mutations before and after execution; boundary and invalid-input scenarios remain explicit. These fixtures are test-only, not development seed data or customer accounts.
+- Automated test setup uses named immutable category and product fixtures and real HTTP setup helpers. `ApiTestClient` shares real requests, login, and CSRF handling across suites. Each test creates fresh records as needed and cleans products before categories before and after execution; boundary and invalid-input scenarios remain explicit. These fixtures are test-only, not development seed data or customer accounts.
 - Implemented: create category, update category, authenticated read by ID, paginated administration list, permanent deletion, field validation, PostgreSQL uniqueness, Flyway migrations, and real HTTP/PostgreSQL tests with explicit Arrange/Act/Assert sections. Request/response mapping is at the controller boundary; persistence failures are translated in the service.
-- Last observed verification on 2026-10-24: all 76 tests passed (75 category integration tests plus the startup test) and Maven `verify` succeeded. Pagination-offset regression tests first reproduced `500` responses, then confirmed deliberate `400` responses above JPA's limit and successful reads at the supported boundary. This records the completed run, not a guarantee about later changes.
+- Last observed verification on 2026-10-31: all 273 tests passed (118 category integration tests, 154 product integration tests, and the startup test) and Maven `verify` succeeded. Permanent validation regressions first reproduced silently accepted ID/boolean types and image errors under non-request field names. Green coverage now rejects decimal/quoted/empty IDs and numeric/quoted/empty active flags on POST and PUT without changing stored data, and checks image errors against `imageUrl` and `imageAltText`. Existing null/default rules, CRUD, pagination, concurrency, security, category deletion protection, and migration tests remain green. Tests reuse immutable fixtures, create fresh records through real HTTP, and clean disposable PostgreSQL before and after each test. This records the completed run, not a guarantee about later changes.
 - Implemented: shared `BusinessException`, `ErrorCode`, and central `ApiExceptionHandler` replace category-specific exception and handler classes. Existing response formats are preserved; codes are internal and are not added to response bodies.
 - Dedicated admin security remains its own feature. Public browsing and inactive-category visibility are not implemented yet.
 - Prepared: `.github/workflows/pr-tests.yml` runs Java 21, Docker-backed PostgreSQL tests, and Maven verification on PR creation and updates, using the stable check name `Maven verification`. Workflow syntax was checked locally with actionlint. The first GitHub-hosted run is not yet observed. The owner must push/open the PR and configure the check as required in branch protection or an active ruleset to block merging on failure; repository settings have not been changed.
 - Future catalogue operations will be agreed and built individually; this list does not authorize starting the next feature automatically.
-- Category maintenance CRUD, named test fixtures, and the PR workflow file are implemented. PR merge enforcement still requires owner configuration. Public catalogue browsing, dedicated admin security, and products remain separate work.
+- Category maintenance CRUD with optional one-level subcategories, complete product maintenance CRUD with a price and optional image plus paginated administration listing, named test fixtures, and the PR workflow file are implemented. PR merge enforcement still requires owner configuration. Variants, public catalogue browsing, and dedicated admin security remain separate work.
 
 ## Later phases
 
@@ -279,3 +350,11 @@ Record meaningful product and architecture decisions here until a dedicated deci
 | 2026-10-24 | List all categories for administration in pages sorted by ID, defaulting to 20 items and capped at 100 per page. | Accepted; implemented | Supports an admin list without unbounded responses or exposing persistence-specific page formats. |
 | 2026-10-24 | Permanently delete categories through authenticated, CSRF-protected DELETE; return 204 on success and 404 if missing. | Accepted; implemented | Completes category maintenance CRUD; active status remains the alternative for hiding categories without removing them. |
 | 2026-10-24 | Reject category pagination offsets above JPA's integer limit with 400. | Accepted; implemented | Prevents otherwise valid page/size values from reaching an unhandled persistence error; values at the supported boundary remain allowed. |
+| 2026-10-31 | Give simple products their own price and make variants optional. | Accepted; simple-product creation implemented, variants deferred | Products without size or other options should not require a synthetic variant. |
+| 2026-10-31 | Support optional one-level subcategories through parentId; block deleting parents with children. | Accepted; implemented | Allows the broad catalogue to be grouped as real products are added while preserving existing categories and preventing deeper nesting. |
+| 2026-10-31 | Create products with a positive rand price, an existing category, and one optional HTTPS image URL and alternative text; block deleting categories with products. | Accepted; implemented | Makes a simple catalogue product useful immediately without requiring variants, uploads, or a media-provider dependency. |
+| 2026-10-31 | Allow authenticated product reads by numeric ID, including inactive products and nullable image metadata. | Accepted; implemented | Supports private catalogue maintenance while reusing the product response and keeping public browsing separate. |
+| 2026-10-31 | List all products for administration in pages sorted by ID, defaulting to 20 items, capped at 100, and limited to JPA's supported offset. | Accepted; implemented | Gives the admin catalogue a bounded list using the same pagination contract as categories, with public browsing kept separate. |
+| 2026-10-31 | Replace product fields through authenticated, CSRF-protected PUT, requiring active, clearing omitted optional fields, and allowing category changes. | Accepted; implemented | Completes product editing while preserving IDs, validation rules, transactional rollback, and category deletion protection. |
+| 2026-10-31 | Permanently delete products through authenticated, CSRF-protected DELETE, returning 204 on success and 404 when missing. | Accepted; implemented | Completes product maintenance CRUD while retaining category records and external image files; active status remains the alternative for hiding products. |
+| 2026-10-31 | Reject incorrect JSON types for numeric IDs and active flags, and map product image errors to the actual request fields. | Accepted; implemented | Prevents silent truncation or conversion of invalid values and gives frontend forms consistent field-error keys. |

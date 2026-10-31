@@ -1,27 +1,20 @@
 package com.pickaspice.api.category;
 
-import java.net.CookieManager;
-import java.net.CookiePolicy;
-import java.net.URI;
-import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.concurrent.Executors;
 
+import com.pickaspice.api.ApiTestClient;
 import com.pickaspice.api.TestDatabaseConfiguration;
+import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,6 +28,7 @@ import tools.jackson.databind.ObjectMapper;
 import static org.assertj.core.api.Assertions.assertThat;
 import static com.pickaspice.api.category.CategoryFixtures.EXISTING_CATEGORY;
 import static com.pickaspice.api.category.CategoryFixtures.HERBAL_OILS;
+import static com.pickaspice.api.category.CategoryFixtures.HERBAL_PRODUCTS;
 import static com.pickaspice.api.category.CategoryFixtures.INACTIVE_INCENSE;
 import static com.pickaspice.api.category.CategoryFixtures.PACKAGING;
 import static com.pickaspice.api.category.CategoryFixtures.PAGINATION_CATEGORIES;
@@ -46,8 +40,6 @@ import static com.pickaspice.api.category.CategoryFixtures.PAGINATION_CATEGORIES
 @Import(TestDatabaseConfiguration.class)
 class CategoryIntegrationTests {
 
-	private static final Pattern CSRF_INPUT = Pattern.compile("name=\"_csrf\"[^>]*value=\"([^\"]+)\"");
-
 	@Value("${local.server.port}")
 	private int port;
 
@@ -57,19 +49,19 @@ class CategoryIntegrationTests {
 	@Autowired
 	private ObjectMapper json;
 
-	private HttpClient client;
+	private ApiTestClient client;
 
 	@BeforeEach
 	void prepareRequestClientAndDatabase() {
-		client = HttpClient.newBuilder()
-				.cookieHandler(new CookieManager(null, CookiePolicy.ACCEPT_ALL))
-				.connectTimeout(Duration.ofSeconds(10)).build();
+		client = new ApiTestClient(port);
+		jdbc.update("delete from products");
 		jdbc.update("delete from categories");
 	}
 
 	@AfterEach
 	void cleanDatabaseAndCloseRequestClient() {
 		try {
+			jdbc.update("delete from products");
 			jdbc.update("delete from categories");
 		}
 		finally {
@@ -761,6 +753,449 @@ class CategoryIntegrationTests {
 		assertThat(categoryCount()).isEqualTo(1);
 	}
 
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false})
+	void createsTopLevelCategoryWithOmittedOrNullParent(boolean explicitNull) throws Exception {
+		// Arrange
+		Map<String, Object> request = new LinkedHashMap<>(PACKAGING);
+		if (explicitNull) {
+			request.put("parentId", null);
+		}
+
+		// Act
+		HttpResponse<String> response = create(request);
+
+		// Assert
+		assertThat(response.statusCode()).isEqualTo(201);
+		assertThat(json.readTree(response.body()).path("parentId").isNull()).isTrue();
+		assertThat(jdbc.queryForMap("select * from categories")).containsEntry("parent_id", null);
+	}
+
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false})
+	void createsSubcategoryUnderActiveOrInactiveParent(boolean parentActive) throws Exception {
+		// Arrange
+		Map<String, Object> parent = new LinkedHashMap<>(HERBAL_PRODUCTS);
+		parent.put("active", parentActive);
+		long parentId = givenCategoryId(parent);
+		Map<String, Object> parentBefore = savedCategory(parentId);
+		Map<String, Object> request = withParent(HERBAL_OILS, parentId);
+
+		// Act
+		HttpResponse<String> response = create(request);
+
+		// Assert
+		assertThat(response.statusCode()).isEqualTo(201);
+		JsonNode body = json.readTree(response.body());
+		assertThat(body.path("parentId").asLong()).isEqualTo(parentId);
+		assertThat(body.get("active").asBoolean()).isTrue();
+		assertThat(savedCategory(body.get("id").asLong())).containsEntry("parent_id", parentId);
+		assertThat(savedCategory(parentId)).isEqualTo(parentBefore);
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"POST", "PUT"})
+	void rejectsMissingParentWithoutChangingData(String method) throws Exception {
+		// Arrange
+		long id = givenCategoryId(EXISTING_CATEGORY);
+		var before = jdbc.queryForList("select * from categories order by id");
+		Map<String, Object> request = withParent(Map.of("name", "Changed", "active", false), id + 1);
+		String path = "/api/admin/categories" + (method.equals("PUT") ? "/" + id : "");
+
+		// Act
+		HttpResponse<String> response = send(method, path, json.writeValueAsString(request), true, true);
+
+		// Assert
+		assertProblem(response, 404);
+		assertThat(json.readTree(response.body()).get("detail").asText()).isEqualTo("Category not found.");
+		assertThat(jdbc.queryForList("select * from categories order by id")).isEqualTo(before);
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"POST", "PUT"})
+	void rejectsUsingSubcategoryAsParentWithoutChangingData(String method) throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long childId = givenCategoryId(withParent(HERBAL_OILS, parentId));
+		long id = givenCategoryId(PACKAGING);
+		var before = jdbc.queryForList("select * from categories order by id");
+		Map<String, Object> request = withParent(Map.of("name", "Changed", "active", false), childId);
+		String path = "/api/admin/categories" + (method.equals("PUT") ? "/" + id : "");
+
+		// Act
+		HttpResponse<String> response = send(method, path, json.writeValueAsString(request), true, true);
+
+		// Assert
+		assertProblem(response, 400);
+		assertThat(jdbc.queryForList("select * from categories order by id")).isEqualTo(before);
+	}
+
+	@Test
+	void rejectsCategoryAsOwnParentWithoutChangingData() throws Exception {
+		// Arrange
+		long id = givenCategoryId(EXISTING_CATEGORY);
+		Map<String, Object> before = savedCategory(id);
+		Map<String, Object> request = withParent(Map.of("name", "Changed", "active", false), id);
+
+		// Act
+		HttpResponse<String> response = update(id, request);
+
+		// Assert
+		assertProblem(response, 400);
+		assertThat(savedCategory(id)).isEqualTo(before);
+	}
+
+	@Test
+	void rejectsMovingCategoryWithChildrenUnderAnotherParent() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		givenCategory(withParent(HERBAL_OILS, parentId));
+		long otherId = givenCategoryId(PACKAGING);
+		var before = jdbc.queryForList("select * from categories order by id");
+		Map<String, Object> request = withParent(Map.of("name", "Changed", "active", false), otherId);
+
+		// Act
+		HttpResponse<String> response = update(parentId, request);
+
+		// Assert
+		assertProblem(response, 400);
+		assertThat(jdbc.queryForList("select * from categories order by id")).isEqualTo(before);
+	}
+
+	@Test
+	void rejectsMovingParentUnderItsOwnChild() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long childId = givenCategoryId(withParent(HERBAL_OILS, parentId));
+		var before = jdbc.queryForList("select * from categories order by id");
+		Map<String, Object> request = withParent(Map.of("name", "Changed", "active", false), childId);
+
+		// Act
+		HttpResponse<String> response = update(parentId, request);
+
+		// Assert
+		assertProblem(response, 400);
+		assertThat(jdbc.queryForList("select * from categories order by id")).isEqualTo(before);
+	}
+
+	@Test
+	void assignsParentToExistingTopLevelCategory() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long id = givenCategoryId(HERBAL_OILS);
+		Map<String, Object> request = withParent(Map.of("name", "Herbal Oils", "active", true), parentId);
+
+		// Act
+		HttpResponse<String> response = update(id, request);
+
+		// Assert
+		assertThat(response.statusCode()).isEqualTo(200);
+		assertThat(json.readTree(response.body()).path("parentId").asLong()).isEqualTo(parentId);
+		assertThat(savedCategory(id)).containsEntry("parent_id", parentId);
+	}
+
+	@Test
+	void movesSubcategoryToAnotherTopLevelParent() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long id = givenCategoryId(withParent(HERBAL_OILS, parentId));
+		long otherId = givenCategoryId(PACKAGING);
+		Map<String, Object> request = withParent(Map.of("name", "Herbal Oils", "active", true), otherId);
+
+		// Act
+		HttpResponse<String> response = update(id, request);
+
+		// Assert
+		assertThat(response.statusCode()).isEqualTo(200);
+		assertThat(json.readTree(response.body()).path("parentId").asLong()).isEqualTo(otherId);
+		assertThat(savedCategory(id)).containsEntry("parent_id", otherId);
+		assertThat(savedCategory(parentId)).containsEntry("parent_id", null);
+	}
+
+	@Test
+	void allowsKeepingSubcategoryParentOnUpdate() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long id = givenCategoryId(withParent(HERBAL_OILS, parentId));
+		Map<String, Object> request = withParent(Map.of("name", "Updated Oils", "active", false), parentId);
+
+		// Act
+		HttpResponse<String> response = update(id, request);
+
+		// Assert
+		assertThat(response.statusCode()).isEqualTo(200);
+		assertThat(json.readTree(response.body()).path("parentId").asLong()).isEqualTo(parentId);
+		assertThat(savedCategory(id)).containsEntry("parent_id", parentId)
+				.containsEntry("name", "Updated Oils").containsEntry("active", false);
+	}
+
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false})
+	void clearsOmittedOrNullParentOnUpdate(boolean explicitNull) throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long id = givenCategoryId(withParent(HERBAL_OILS, parentId));
+		Map<String, Object> request = new LinkedHashMap<>(Map.of("name", "Herbal Oils", "active", true));
+		if (explicitNull) {
+			request.put("parentId", null);
+		}
+
+		// Act
+		HttpResponse<String> response = update(id, request);
+
+		// Assert
+		assertThat(response.statusCode()).isEqualTo(200);
+		assertThat(json.readTree(response.body()).path("parentId").isNull()).isTrue();
+		assertThat(savedCategory(id)).containsEntry("parent_id", null);
+	}
+
+	@Test
+	void allowsEditingParentWithoutChangingChildActivity() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long childId = givenCategoryId(withParent(HERBAL_OILS, parentId));
+		Map<String, Object> childBefore = savedCategory(childId);
+		Map<String, Object> request = Map.of("name", "Updated Herbal Products", "active", false);
+
+		// Act
+		HttpResponse<String> response = update(parentId, request);
+
+		// Assert
+		assertThat(response.statusCode()).isEqualTo(200);
+		assertThat(savedCategory(parentId)).containsEntry("active", false).containsEntry("parent_id", null);
+		assertThat(savedCategory(childId)).isEqualTo(childBefore);
+	}
+
+	@Test
+	void readsParentIdInCategoryAndPaginatedList() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long childId = givenCategoryId(withParent(HERBAL_OILS, parentId));
+		var before = jdbc.queryForList("select * from categories order by id");
+
+		// Act
+		HttpResponse<String> read = send("GET", "/api/admin/categories/" + childId, "", true, false);
+		HttpResponse<String> list = send("GET", "/api/admin/categories", "", true, false);
+
+		// Assert
+		assertThat(read.statusCode()).isEqualTo(200);
+		assertThat(json.readTree(read.body()).path("parentId").asLong()).isEqualTo(parentId);
+		assertThat(list.statusCode()).isEqualTo(200);
+		JsonNode items = json.readTree(list.body()).get("items");
+		assertThat(items.size()).isEqualTo(2);
+		assertThat(items.get(0).path("parentId").isNull()).isTrue();
+		assertThat(items.get(1).path("parentId").asLong()).isEqualTo(parentId);
+		assertThat(jdbc.queryForList("select * from categories order by id")).isEqualTo(before);
+	}
+
+	@Test
+	void rejectsDeletingParentWithSubcategories() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		givenCategory(withParent(INACTIVE_INCENSE, parentId));
+		var before = jdbc.queryForList("select * from categories order by id");
+
+		// Act
+		HttpResponse<String> response = send("DELETE", "/api/admin/categories/" + parentId, "", true, true);
+
+		// Assert
+		assertProblem(response, 409);
+		assertThat(json.readTree(response.body()).get("detail").asText())
+				.isEqualTo("A category with subcategories cannot be deleted.");
+		assertThat(jdbc.queryForList("select * from categories order by id")).isEqualTo(before);
+	}
+
+	@Test
+	void deletesSubcategoryWithoutDeletingItsParent() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long childId = givenCategoryId(withParent(HERBAL_OILS, parentId));
+		Map<String, Object> parentBefore = savedCategory(parentId);
+
+		// Act
+		HttpResponse<String> response = send("DELETE", "/api/admin/categories/" + childId, "", true, true);
+
+		// Assert
+		assertThat(response.statusCode()).isEqualTo(204);
+		assertThat(response.body()).isEmpty();
+		assertThat(categoryCount()).isEqualTo(1);
+		assertThat(savedCategory(parentId)).isEqualTo(parentBefore);
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"POST", "PUT"})
+	void keepsCategoryNamesUniqueAcrossParents(String method) throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		givenCategory(withParent(HERBAL_OILS, parentId));
+		long otherId = givenCategoryId(PACKAGING);
+		long id = givenCategoryId(INACTIVE_INCENSE);
+		var before = jdbc.queryForList("select * from categories order by id");
+		Map<String, Object> request = withParent(Map.of("name", " HERBAL OILS ", "active", true), otherId);
+		String path = "/api/admin/categories" + (method.equals("PUT") ? "/" + id : "");
+
+		// Act
+		HttpResponse<String> response = send(method, path, json.writeValueAsString(request), true, true);
+
+		// Assert
+		assertProblem(response, 409);
+		assertThat(jdbc.queryForList("select * from categories order by id")).isEqualTo(before);
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"POST", "PUT"})
+	void rejectsNonNumericParentWithoutChangingData(String method) throws Exception {
+		// Arrange
+		long id = givenCategoryId(EXISTING_CATEGORY);
+		var before = jdbc.queryForList("select * from categories order by id");
+		String request = "{\"name\":\"Changed\",\"active\":true,\"parentId\":\"invalid\"}";
+		String path = "/api/admin/categories" + (method.equals("PUT") ? "/" + id : "");
+
+		// Act
+		HttpResponse<String> response = send(method, path, request, true, true);
+
+		// Assert
+		assertProblem(response, 400);
+		assertThat(jdbc.queryForList("select * from categories order by id")).isEqualTo(before);
+	}
+
+	@Test
+	void concurrentChildCreationAndParentMoveKeepOnlyOneSubcategoryLevel() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long otherId = givenCategoryId(PACKAGING);
+		Map<String, Object> child = withParent(HERBAL_OILS, parentId);
+		Map<String, Object> move = withParent(Map.of("name", "Herbal Products", "active", true), otherId);
+		csrfToken();
+
+		// Act
+		List<HttpResponse<String>> responses;
+		try (var requests = Executors.newFixedThreadPool(2)) {
+			var results = requests.<HttpResponse<String>>invokeAll(List.of(() -> create(child), () -> update(parentId, move)));
+			responses = List.of(results.get(0).get(), results.get(1).get());
+		}
+
+		// Assert
+		List<Integer> statuses = responses.stream().map(HttpResponse::statusCode).toList();
+		assertThat(statuses).isIn(List.of(201, 400), List.of(400, 200));
+		assertThat(jdbc.queryForObject("""
+				select count(*) from categories child join categories parent on child.parent_id = parent.id
+				where parent.parent_id is not null
+				""", Long.class)).isZero();
+	}
+
+	@Test
+	void concurrentParentDeletionAndChildCreationDoNotLeaveOrphans() throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		Map<String, Object> child = withParent(HERBAL_OILS, parentId);
+		csrfToken();
+
+		// Act
+		List<HttpResponse<String>> responses;
+		try (var requests = Executors.newFixedThreadPool(2)) {
+			var results = requests.<HttpResponse<String>>invokeAll(List.of(() -> create(child),
+					() -> send("DELETE", "/api/admin/categories/" + parentId, "", true, true)));
+			responses = List.of(results.get(0).get(), results.get(1).get());
+		}
+
+		// Assert
+		List<Integer> statuses = responses.stream().map(HttpResponse::statusCode).toList();
+		assertThat(statuses).isIn(List.of(201, 409), List.of(404, 204));
+		assertThat(jdbc.queryForObject("""
+				select count(*) from categories child left join categories parent on child.parent_id = parent.id
+				where child.parent_id is not null and parent.id is null
+				""", Long.class)).isZero();
+	}
+
+	@Test
+	void parentMigrationPreservesExistingCategoryData() {
+		try {
+			// Arrange
+			Flyway.configure().dataSource(jdbc.getDataSource()).schemas("category_upgrade_test")
+					.defaultSchema("category_upgrade_test").target("1").load().migrate();
+			jdbc.update("""
+					insert into category_upgrade_test.categories (name, description, active)
+					values (?, ?, ?)
+					""", EXISTING_CATEGORY.get("name"), EXISTING_CATEGORY.get("description"), false);
+			Map<String, Object> before = jdbc.queryForMap("select * from category_upgrade_test.categories");
+
+			// Act
+			Flyway.configure().dataSource(jdbc.getDataSource()).schemas("category_upgrade_test")
+					.defaultSchema("category_upgrade_test").load().migrate();
+
+			// Assert
+			assertThat(jdbc.queryForMap("select * from category_upgrade_test.categories"))
+					.containsAllEntriesOf(before).containsEntry("parent_id", null);
+		}
+		finally {
+			jdbc.execute("drop schema if exists category_upgrade_test cascade");
+		}
+	}
+
+	@ParameterizedTest
+	@CsvSource(delimiter = '|', textBlock = """
+			POST | %s.9
+			PUT  | %s.9
+			POST | %s.0
+			PUT  | %s.0
+			POST | "%s"
+			PUT  | "%s"
+			POST | ""
+			PUT  | ""
+			""")
+	void rejectsNonIntegerJsonParentIdWithoutChangingData(String method, String idTemplate) throws Exception {
+		// Arrange
+		long parentId = givenCategoryId(HERBAL_PRODUCTS);
+		long id = givenCategoryId(HERBAL_OILS);
+		var before = jdbc.queryForList("select * from categories order by id");
+		Map<String, Object> request = new LinkedHashMap<>(Map.of("name", "Changed Category", "active", true));
+		request.put("parentId", json.readTree(idTemplate.formatted(parentId)));
+		String path = "/api/admin/categories" + (method.equals("PUT") ? "/" + id : "");
+
+		// Act
+		HttpResponse<String> response = send(method, path, json.writeValueAsString(request), true, true);
+
+		// Assert
+		assertProblem(response, 400);
+		assertThat(jdbc.queryForList("select * from categories order by id")).isEqualTo(before);
+		assertThat(jdbc.queryForObject("select count(*) from products", Long.class)).isZero();
+	}
+
+	@ParameterizedTest
+	@CsvSource(delimiter = '|', textBlock = """
+			POST | 1
+			PUT  | 1
+			POST | 0
+			PUT  | 0
+			POST | "true"
+			PUT  | "false"
+			POST | ""
+			PUT  | ""
+			""")
+	void rejectsNonBooleanJsonActiveWithoutChangingData(String method, String activeJson) throws Exception {
+		// Arrange
+		long id = givenCategoryId(HERBAL_OILS);
+		var before = jdbc.queryForList("select * from categories order by id");
+		Map<String, Object> request = new LinkedHashMap<>(Map.of("name", "Changed Category"));
+		request.put("active", json.readTree(activeJson));
+		String path = "/api/admin/categories" + (method.equals("PUT") ? "/" + id : "");
+
+		// Act
+		HttpResponse<String> response = send(method, path, json.writeValueAsString(request), true, true);
+
+		// Assert
+		assertProblem(response, 400);
+		assertThat(jdbc.queryForList("select * from categories order by id")).isEqualTo(before);
+		assertThat(jdbc.queryForObject("select count(*) from products", Long.class)).isZero();
+	}
+
+	private Map<String, Object> withParent(Map<String, ?> fixture, long parentId) {
+		Map<String, Object> request = new LinkedHashMap<>(fixture);
+		request.put("parentId", parentId);
+		return request;
+	}
+
 	private JsonNode givenCategory(Map<String, ?> fixture) throws Exception {
 		HttpResponse<String> response = create(fixture);
 		assertThat(response.statusCode()).isEqualTo(201);
@@ -796,42 +1231,15 @@ class CategoryIntegrationTests {
 	}
 
 	private HttpResponse<String> send(String method, String path, String body, boolean authenticated, boolean withCsrf) throws Exception {
-		HttpRequest.Builder request = HttpRequest.newBuilder(uri(path))
-				.timeout(Duration.ofSeconds(10)).header("Content-Type", "application/json")
-				.header("Accept", "application/json");
-		if (withCsrf) {
-			request.header("X-CSRF-TOKEN", csrfToken());
-		}
-		if (authenticated) {
-			String credentials = Base64.getEncoder().encodeToString(
-					"category-test-user:category-test-password".getBytes(StandardCharsets.UTF_8));
-			request.header("Authorization", "Basic " + credentials);
-		}
-		return client.send(request.method(method, HttpRequest.BodyPublishers.ofString(body)).build(),
-				HttpResponse.BodyHandlers.ofString());
+		return client.send(method, path, body, authenticated, withCsrf);
 	}
 
 	private String csrfToken() throws Exception {
-		// Use Spring Security's real default login page until dedicated admin security is implemented.
-		HttpResponse<String> login = client.send(HttpRequest.newBuilder(uri("/login"))
-				.timeout(Duration.ofSeconds(10)).GET().build(), HttpResponse.BodyHandlers.ofString());
-		assertThat(login.statusCode()).isEqualTo(200);
-		Matcher token = CSRF_INPUT.matcher(login.body());
-		assertThat(token.find()).as("Default login page supplies a CSRF token").isTrue();
-		return token.group(1);
+		return client.csrfToken();
 	}
 
 	private void signIn() throws Exception {
-		String form = "username=category-test-user&password=category-test-password&_csrf="
-				+ URLEncoder.encode(csrfToken(), StandardCharsets.UTF_8);
-		HttpResponse<String> login = client.send(HttpRequest.newBuilder(uri("/login"))
-				.timeout(Duration.ofSeconds(10)).header("Content-Type", "application/x-www-form-urlencoded")
-				.POST(HttpRequest.BodyPublishers.ofString(form)).build(), HttpResponse.BodyHandlers.ofString());
-		assertThat(login.statusCode()).isEqualTo(302);
-	}
-
-	private URI uri(String path) {
-		return URI.create("http://localhost:" + port + path);
+		client.signIn();
 	}
 
 	private void assertInvalid(HttpResponse<String> response, String field) throws Exception {

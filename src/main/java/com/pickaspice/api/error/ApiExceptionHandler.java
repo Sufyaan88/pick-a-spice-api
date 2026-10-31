@@ -32,9 +32,9 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 	ResponseEntity<ProblemDetail> handleBusinessException(BusinessException exception) {
 		ErrorCode errorCode = exception.getErrorCode();
 		HttpStatus status = switch (errorCode) {
-			case CATEGORY_NAME_EXISTS -> HttpStatus.CONFLICT;
-			case CATEGORY_NOT_FOUND -> HttpStatus.NOT_FOUND;
-			case PAGE_OFFSET_TOO_LARGE -> HttpStatus.BAD_REQUEST;
+			case CATEGORY_NAME_EXISTS, CATEGORY_HAS_SUBCATEGORIES, CATEGORY_HAS_PRODUCTS, PRODUCT_NAME_EXISTS -> HttpStatus.CONFLICT;
+			case CATEGORY_NOT_FOUND, PRODUCT_NOT_FOUND -> HttpStatus.NOT_FOUND;
+			case PAGE_OFFSET_TOO_LARGE, CATEGORY_PARENT_INVALID -> HttpStatus.BAD_REQUEST;
 		};
 		return ResponseEntity.of(ProblemDetail.forStatusAndDetail(status, errorCode.message())).build();
 	}

@@ -4,7 +4,7 @@
 
 `pick-a-spice-api` is the backend for Pick a Spice, a public online product catalogue for the owner's family business. Its immediate purpose is to give the business a useful online presence and help potential customers discover its products. It is also a personal learning project, so changes should remain understandable, intentional, and practical for one part-time developer.
 
-The first release is a public read-only catalogue with private catalogue maintenance, not an e-commerce system. Category maintenance supports creation, updates, authenticated reads by ID, paginated administration lists, and permanent deletion, with Flyway migrations and real HTTP/PostgreSQL integration tests. Dedicated admin security and public browsing remain future features. Read `FEATURES.md` before making product or architecture decisions.
+The first release is a public read-only catalogue with private catalogue maintenance, not an e-commerce system. Category maintenance supports creation, updates, authenticated reads by ID, paginated administration lists, and permanent deletion, with optional one-level subcategories, Flyway migrations, and real HTTP/PostgreSQL integration tests. Parents with subcategories and categories containing products cannot be deleted. Products support complete maintenance CRUD with a positive rand price, an existing category, one optional externally hosted image, and paginated administration lists including inactive products. Product deletion retains categories and external image files. Variants, dedicated admin security, and public browsing remain future features. Read `FEATURES.md` before making product or architecture decisions.
 
 Core stack:
 
@@ -71,6 +71,7 @@ Run `test` while iterating and `verify` before handing off a change. Do not comm
 - Do not expose JPA entities directly in API request or response bodies. Use explicit request and response DTOs.
 - Use constructor injection. Lombok's `@RequiredArgsConstructor` is acceptable where it keeps the class clear.
 - Validate incoming DTOs at the HTTP boundary and return deliberate status codes and error responses.
+- Numeric IDs in JSON bodies require integer numbers, and active flags require JSON booleans; do not silently coerce decimals, quoted values, or empty strings. Preserve each operation's null/default rules. Field validation errors must use the actual request field names, including cross-field image validation.
 - Put cross-cutting configuration in focused configuration classes; do not add unrelated behavior to `ApiApplication`.
 - Follow the formatting already used by the project and keep imports explicit. Avoid wildcard imports.
 - Add comments only when they explain a non-obvious decision; prefer clear names and small methods.
@@ -109,7 +110,7 @@ Spring Security is present, so new endpoints are secured by default unless the s
 ## Testing expectations
 
 - Structure behavioral tests with explicit `// Arrange`, `// Act`, and `// Assert` sections. Keep the operation under test out of assertion helpers and assertion expressions; helpers named `assert...` should only verify results.
-- Reuse named immutable test fixtures for common starting data. Category fixtures live in `src/test/java/com/pickaspice/api/category/CategoryFixtures.java`; load fresh records through real HTTP setup helpers only when a test needs them. Keep edge-case inputs explicit and copy fixture maps before overriding values. Never share mutable entities or generated IDs across tests.
+- Reuse named immutable test fixtures for common starting data. Category fixtures live in `src/test/java/com/pickaspice/api/category/CategoryFixtures.java`; product fixtures live in `src/test/java/com/pickaspice/api/product/ProductFixtures.java`. `ApiTestClient` shares real HTTP, authentication, and CSRF handling across integration tests. Load fresh records through real HTTP setup helpers only when a test needs them. Keep edge-case inputs explicit and copy fixture maps before overriding values. Never share mutable entities or generated IDs across tests.
 - Clean test data before and after each test, including failure paths. Fixture definitions remain read-only; only the fresh database records are changed by the operation under test. Do not globally seed tests that need an empty database.
 - Development follows strict test-driven development using the red-green-refactor cycle:
   1. Write a test that describes the next behavior.
