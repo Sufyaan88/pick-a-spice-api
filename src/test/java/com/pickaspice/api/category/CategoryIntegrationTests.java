@@ -8,6 +8,8 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 
 import com.pickaspice.api.ApiTestClient;
+import com.pickaspice.api.auth.AdminAccountService;
+import com.pickaspice.api.auth.AdminFixtures;
 import com.pickaspice.api.TestDatabaseConfiguration;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
@@ -33,10 +35,7 @@ import static com.pickaspice.api.category.CategoryFixtures.INACTIVE_INCENSE;
 import static com.pickaspice.api.category.CategoryFixtures.PACKAGING;
 import static com.pickaspice.api.category.CategoryFixtures.PAGINATION_CATEGORIES;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-		"spring.security.user.name=category-test-user",
-		"spring.security.user.password=category-test-password"
-})
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestDatabaseConfiguration.class)
 class CategoryIntegrationTests {
 
@@ -49,6 +48,9 @@ class CategoryIntegrationTests {
 	@Autowired
 	private ObjectMapper json;
 
+	@Autowired
+	private AdminAccountService accounts;
+
 	private ApiTestClient client;
 
 	@BeforeEach
@@ -56,6 +58,8 @@ class CategoryIntegrationTests {
 		client = new ApiTestClient(port);
 		jdbc.update("delete from products");
 		jdbc.update("delete from categories");
+		jdbc.update("delete from users");
+		accounts.create(AdminFixtures.ADMIN_EMAIL, AdminFixtures.ADMIN_PASSWORD);
 	}
 
 	@AfterEach
@@ -63,6 +67,7 @@ class CategoryIntegrationTests {
 		try {
 			jdbc.update("delete from products");
 			jdbc.update("delete from categories");
+			jdbc.update("delete from users");
 		}
 		finally {
 			client.close();
