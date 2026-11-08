@@ -9,6 +9,8 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 
 import com.pickaspice.api.ApiTestClient;
+import com.pickaspice.api.auth.AdminAccountService;
+import com.pickaspice.api.auth.AdminFixtures;
 import com.pickaspice.api.TestDatabaseConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,10 +33,7 @@ import static com.pickaspice.api.product.ProductFixtures.BLACK_SEED_OIL;
 import static com.pickaspice.api.product.ProductFixtures.PAGINATION_PRODUCTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-		"spring.security.user.name=category-test-user",
-		"spring.security.user.password=category-test-password"
-})
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestDatabaseConfiguration.class)
 class ProductIntegrationTests {
 
@@ -47,6 +46,9 @@ class ProductIntegrationTests {
 	@Autowired
 	private ObjectMapper json;
 
+	@Autowired
+	private AdminAccountService accounts;
+
 	private ApiTestClient client;
 
 	@BeforeEach
@@ -54,6 +56,8 @@ class ProductIntegrationTests {
 		client = new ApiTestClient(port);
 		jdbc.update("delete from products");
 		jdbc.update("delete from categories");
+		jdbc.update("delete from users");
+		accounts.create(AdminFixtures.ADMIN_EMAIL, AdminFixtures.ADMIN_PASSWORD);
 	}
 
 	@AfterEach
@@ -61,6 +65,7 @@ class ProductIntegrationTests {
 		try {
 			jdbc.update("delete from products");
 			jdbc.update("delete from categories");
+			jdbc.update("delete from users");
 		}
 		finally {
 			client.close();
